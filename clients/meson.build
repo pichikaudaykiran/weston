@@ -2,6 +2,10 @@ if get_option('resize-pool')
 	config_h.set('USE_RESIZE_POOL', '1')
 endif
 
+if get_option('libdrm_intel')
+	config_h.set('HAVE_LIBDRM_INTEL', '1')
+endif
+
 srcs_toytoolkit = [
 	'window.c',
 	xdg_shell_client_protocol_h,
@@ -121,6 +125,32 @@ simple_clients = [
 			'simple-touch.c',
 		],
 		'dep_objs': [ dep_wayland_client, dep_libshared ]
+	},
+	{
+		'name': 'color-management-image',
+		'sources': [
+			'simple-color-management-image.c',
+			linux_dmabuf_unstable_v1_client_protocol_h,
+			linux_dmabuf_unstable_v1_protocol_c,
+			linux_explicit_synchronization_unstable_v1_client_protocol_h,
+			linux_explicit_synchronization_unstable_v1_protocol_c,
+			xdg_shell_client_protocol_h,
+			xdg_shell_protocol_c,
+			color_management_unstable_v1_protocol_c,
+			color_management_unstable_v1_client_protocol_h,
+			weston_direct_display_client_protocol_h,
+			weston_direct_display_protocol_c,
+			fullscreen_shell_unstable_v1_client_protocol_h,
+			fullscreen_shell_unstable_v1_protocol_c,
+		],
+		'dep_objs': [
+			dep_wayland_client,
+			dep_libdrm,
+			dep_toytoolkit,
+			dep_libm
+		],
+		'deps': [ 'egl', 'glesv2', 'gbm', 'libdrm_intel' ],
+		'options': [ 'renderer-gl' ]
 	},
 ]
 

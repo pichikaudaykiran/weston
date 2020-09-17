@@ -198,6 +198,12 @@ option(
 	description: 'Sample clients: optimize window resize performance'
 )
 option(
+	'libdrm_intel',
+	type: 'boolean',
+	value: true,
+	description: 'Sample clients: enable use of libdrm_intel'
+)
+option(
 	'wcap-decode',
 	type: 'boolean',
 	value: true,

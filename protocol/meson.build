@@ -20,6 +20,7 @@ generated_protocols = [
 	[ 'fullscreen-shell', 'v1' ],
 	[ 'linux-dmabuf', 'v1' ],
 	[ 'linux-explicit-synchronization', 'v1' ],
+	[ 'color-management', 'v1' ],
 	[ 'presentation-time', 'stable' ],
 	[ 'pointer-constraints', 'v1' ],
 	[ 'relative-pointer', 'v1' ],
