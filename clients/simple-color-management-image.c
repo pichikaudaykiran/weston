@@ -44,10 +44,6 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/mastering_display_metadata.h>
-
 #include <xf86drm.h>
 #include <drm_fourcc.h>
 
@@ -145,7 +141,6 @@ struct buffer {
 	int bpp;
 	unsigned long stride;
 	int format;
-	AVFrame *prev_frame;
 };
 
 struct subtitle {
@@ -179,6 +174,8 @@ struct app {
 	struct subtitle *subtitle;
 
 	struct zwp_color_manager_v1 *color_manager;
+	struct zwp_color_space_v1 *color_space;
+	struct zwp_color_management_surface_v1 *cm_surface;
 	struct zwp_linux_dmabuf_v1 *dmabuf;
 };
 
@@ -952,6 +949,33 @@ image_create(struct display *display, const char *filename)
 		free(app);
 		return NULL;
 	}
+
+	app->cm_surface = zwp_color_manager_v1_get_color_management_surface(
+					app->color_manager,
+					widget_get_wl_surface(app->widget)); // surface
+	if (app->cm_surface == NULL) {
+		fprintf(stderr, "error: cm_surface is NULL \n");
+		free(app);
+		return NULL;
+	}
+
+	app->color_space = zwp_color_manager_v1_create_color_space_from_names(app->color_manager,
+			ZWP_COLOR_MANAGER_V1_EOTF_NAMES_SRGB, // EOTF
+			ZWP_COLOR_MANAGER_V1_CHROMATICITY_NAMES_BT709, // Chromaticity
+			ZWP_COLOR_MANAGER_V1_WHITEPOINT_NAMES_D65 //Whitepoint
+			);
+	if (app->color_space == NULL) {
+		fprintf(stderr, "error: color_space is NULL \n");
+		free(app);
+		return NULL;
+	}
+
+	fprintf(stderr, "zwp_color_management_surface_v1_set_color_space\n");
+	zwp_color_management_surface_v1_set_color_space(
+			app->cm_surface,
+			app->color_space,
+			ZWP_COLOR_MANAGEMENT_SURFACE_V1_RENDER_INTENT_RELATIVE,
+			ZWP_COLOR_MANAGEMENT_SURFACE_V1_ALPHA_MODE_STRAIGHT);
 
 	/* if (option_subtitle) */
 	/* 	app->subtitle = subtitle_create(app); */
