@@ -159,6 +159,7 @@ struct buffer {
 	int bpp;
 	unsigned long stride;
 	int format;
+	uint16_t bytes_per_pixel;
 };
 
 struct subtitle {
@@ -399,42 +400,75 @@ image_next_buffer(struct image *s)
 }
 
 static void
-fill_buffer(struct buffer *buffer, struct image *image) {
-	int i = 0;
+copy_nv12_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0, y_size = 0;
+    int i = 0;
 
-	int frame_size = 0, y_size = 0;
+    unsigned char *y_src = NULL, *u_src = NULL;
+    unsigned char *y_dst = NULL, *uv_dst = NULL;
+    unsigned char *src_buffer = NULL;
 
-	unsigned char *y_src = NULL, *u_src = NULL;
-	unsigned char *y_dst = NULL, *u_dst = NULL;
-	unsigned char *src_buffer = NULL;
+    assert(buffer->mmap);
 
-	int bytes_per_pixel = 2;
-	assert(buffer->mmap);
+    frame_size = buffer->width * buffer->height  + ((buffer->width * buffer->height) >> 1);
+    y_size = buffer->width * buffer->height;
 
-        frame_size = buffer->width * buffer->height * bytes_per_pixel * 3 / 2;
-        y_size = buffer->width * buffer->height * bytes_per_pixel;
+    syslog(LOG_INFO,"frame_size = %d, y_size = %d \n", frame_size, y_size);
 
-        src_buffer = (unsigned char*)malloc(frame_size);
-        fread(src_buffer, 1, frame_size, image->fp);
-        y_src = src_buffer;
-        u_src = src_buffer + y_size; // UV offset for P010
+    src_buffer = (unsigned char*)malloc(frame_size);
+    fread(src_buffer, 1, frame_size, image->fp);
+    y_src = src_buffer;
+    u_src = src_buffer + y_size; // UV offset for NV12
+    syslog(LOG_INFO,"src_buffer = %p, u_src = %p, difference = %d \n", src_buffer, u_src, u_src-src_buffer);
 
-	fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
+    fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
 
-        y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
-        u_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // U offset for P010
+    y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
+    uv_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // U offset for P010
+    //uv_dst = (unsigned char*)buffer->mmap + buffer->width * buffer->height; // U offset for P010
 
-        for (i = 0; i < buffer->height; i++) {
-		memcpy(y_dst, y_src, buffer->width * 2);
-		y_dst += buffer->stride;
-		y_src += buffer->width * 2;
-        }
+    for (i = 0; i < buffer->height; i++) {
+      memcpy(y_dst, y_src, buffer->width);
+      y_dst += buffer->stride;  // Doing the line by line copy. that is the reason, he is moving after buffer->stride
+      y_src += buffer->width;
+    }
 
-        for (i = 0; i < buffer->height >> 1; i++)  {
-		memcpy(u_dst, u_src, buffer->width * 2);
-		u_dst += buffer->stride;
-		u_src += buffer->width * 2;
-        }
+    for (i = 0; i < buffer->height >> 1; i++)  {
+      memcpy(uv_dst, u_src, buffer->width);
+      uv_dst += buffer->stride;
+      u_src += buffer->width;
+    }
+}
+
+static void
+fill_buffer(struct buffer *buffer, struct image *image)
+{
+    int i = 0;
+    int height;
+    int plane_heights[4] = {0};
+    int offsets[4] = {0};
+    int n_planes = 0;
+    syslog(LOG_INFO,"%s \n",__func__);
+
+    switch (buffer->format) {
+        case DRM_FORMAT_YUV420:
+            plane_heights[0] = buffer->height;
+            plane_heights[1] = buffer->height / 2;
+            plane_heights[2] = buffer->height / 2;
+            offsets[0] = 0;
+            offsets[1] = buffer->height;
+            offsets[2] = buffer->height * 3 / 2;
+            n_planes = 3;
+            break;
+        case DRM_FORMAT_P010:
+            // In this case, the input file has pixel format of YUV420.
+            //copy_yuv420p10_to_p010_to_dma_buf(image, buffer);
+            //return 1;
+        case DRM_FORMAT_NV12:
+            copy_nv12_to_dma_buf(image, buffer);
+            return 1;
+	}
 }
 
 static void
@@ -801,6 +835,9 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 	drm_dev = buffer->dev;
 
 	buffer->width = width;
+	buffer->height = height;
+	buffer->format = format;
+
 	switch (format) {
 	case DRM_FORMAT_NV12:
 		/* adjust height for allocation of NV12 Y and UV planes */
@@ -819,7 +856,6 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 		buffer->height = height;
 		buffer->bpp = 32;
 	}
-	buffer->format = format;
 
 	if (!drm_dev->alloc_bo(buffer)) {
 		fprintf(stderr, "alloc_bo failed\n");
@@ -862,7 +898,7 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 		zwp_linux_buffer_params_v1_add(params,
 					       buffer->dmabuf_fd,
 					       1,
-					       buffer->width * buffer->height,
+					       buffer->stride * buffer->height,
 					       buffer->stride,
 					       modifier >> 32,
 					       modifier & 0xffffffff);
