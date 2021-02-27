@@ -90,19 +90,36 @@
 static int32_t option_help;
 static int32_t option_fullscreen;
 static int32_t option_subtitle;
+static char* option_input_file;
+static uint32_t option_pixel_format;
+static uint32_t option_width;
+static uint32_t option_height;
 
 static const struct weston_option options[] = {
-	{ WESTON_OPTION_BOOLEAN, "fullscreen", 'f', &option_fullscreen },
-	{ WESTON_OPTION_BOOLEAN, "subtitle", 's', &option_subtitle },
-	{ WESTON_OPTION_BOOLEAN, "help", 'h', &option_help },
+	{ WESTON_OPTION_BOOLEAN, "fullscreen", 'fs', &option_fullscreen },
+	{ WESTON_OPTION_BOOLEAN, "subtitle", 's', &option_subtitle },	
+	{ WESTON_OPTION_STRING, "input_file", 'i', &option_input_file },
+	{ WESTON_OPTION_STRING, "pixel_format", 'p', &option_pixel_format },
+	{ WESTON_OPTION_INTEGER, "width", 'w', &option_width },
+	{ WESTON_OPTION_INTEGER, "height", 'h', &option_height },
+	{ WESTON_OPTION_STRING, "help", 'help', &option_help },
 };
 
 static const char help_text[] =
 "Usage: %s [options] FILENAME\n"
 "\n"
-"  -f, --fullscreen\t\tRun in fullscreen mode\n"
-"  -s, --subtitle\t\tShow subtiles\n"
-"  -h, --help\t\tShow this help text\n"
+"   -f, --fullscreen\tRun in fullscreen mode\n"
+"   -s, --subtitle\tShow subtiles\n"
+"   -i, --input\t\tInput Image file to render\n"
+"   -p, --pix_fmt\tImage pixel format\n"
+"                   YUV420 \n"
+"                   NV12\n"
+"                   P010 \n"
+"                   ARGB8888\n"
+"                   BGRA8888\n"
+"   -w, --width\t\tWidth of the input image file\n"
+"   -h, --height\t\tHeight of the input file\n"
+"   -x, --help\t\tShow this help text\n"
 "\n";
 
 struct app;
@@ -980,9 +997,9 @@ image_create(struct display *display, const char *filename)
 	/* if (option_subtitle) */
 	/* 	app->subtitle = subtitle_create(app); */
 
-	width = 1920;
-	height = 1080;
-	format = DRM_FORMAT_P010;
+	width = option_width;
+	height = option_height;
+	format = option_pixel_format;
 
 	if (option_fullscreen) {
 		window_set_fullscreen(app->window, 1);
@@ -1019,15 +1036,83 @@ image_destroy(struct app *app)
 	free(app);
 }
 
+static int parse_pixel_format(const char* c)
+{
+	if (c != NULL) {
+		if (!strcmp(c, "YUV420"))
+			return DRM_FORMAT_YUV420;
+		else if (!strcmp(c, "NV12"))
+			return DRM_FORMAT_NV12;
+		else if (!strcmp(c, "XRGB8888"))
+			return DRM_FORMAT_XRGB8888;
+		else if (!strcmp(c, "ARGB8888"))
+			return DRM_FORMAT_ARGB8888;
+		else if (!strcmp(c, "BGRA8888"))
+			return DRM_FORMAT_BGRA8888;
+		else if (!strcmp(c, "P010"))
+			return DRM_FORMAT_P010;
+	}
+	return DRM_FORMAT_XRGB8888;
+}
+
+static int
+is_true(const char* c)
+{
+	int ret = 0;
+	if (c != NULL && ((c[0] ==  '1') || !strcasecmp(c, "true")))
+		ret = 1;
+	return ret;
+}
+
 int
 main(int argc, char *argv[])
 {
 	struct display *display;
 	struct app *app;
 
-	parse_options(options, ARRAY_LENGTH(options), &argc, argv);
-	if (option_help) {
-		printf(help_text, argv[0]);
+	int r, c, option_index, long_options;
+	int pix_fmt = DRM_FORMAT_XRGB8888;
+	
+    while ((c = getopt_long(argc, argv, "f:s:i:p:w:h:x:",
+				  long_options, &option_index)) != -1) {
+		switch (c) {			
+		case 'f':
+			if (is_true(optarg))
+				option_fullscreen = 1;
+			else
+				option_fullscreen = 0;
+			break;
+			
+		case 's':
+			if (is_true(optarg))
+				option_subtitle = 1;
+			else
+				option_subtitle = 0;
+			break;
+
+		case 'i':
+			option_input_file = optarg;
+			break;
+
+		case 'w':
+			option_width = atoi(optarg);
+			break;
+
+		case 'h':
+			option_height = atoi(optarg);
+			break;
+
+		case 'p':
+			option_pixel_format = parse_pixel_format(optarg);
+			break;
+
+		case 'x':
+		default:
+			return 0;
+		}
+	}
+
+	if( option_input_file == NULL) {
 		return 0;
 	}
 
@@ -1043,7 +1128,7 @@ main(int argc, char *argv[])
 		return -1;
 	}
 
-	app = image_create(display, argv[argc - 1]);
+	app = image_create(display, option_input_file);
 	if (!app) {
 		fprintf(stderr, "Failed to initialize!");
 		exit(EXIT_FAILURE);
