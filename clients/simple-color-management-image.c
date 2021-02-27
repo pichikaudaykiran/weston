@@ -399,6 +399,22 @@ image_next_buffer(struct image *s)
 	return NULL;
 }
 
+static void 
+copy_rgb_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0;
+    unsigned char *src_buffer = NULL;
+    unsigned char *dst_buffer = NULL;
+
+    assert(buffer->mmap);
+    frame_size = buffer->width * buffer->height * buffer->bytes_per_pixel;
+    src_buffer = (unsigned char*)malloc(frame_size);
+    fread(src_buffer, 1, frame_size, image->fp);
+
+    dst_buffer = (unsigned char*)buffer->mmap + 0;
+    memcpy(dst_buffer, src_buffer, frame_size);
+}
+
 static void
 copy_nv12_to_dma_buf(struct image *image, struct buffer *buffer)
 {
@@ -468,6 +484,11 @@ fill_buffer(struct buffer *buffer, struct image *image)
         case DRM_FORMAT_NV12:
             copy_nv12_to_dma_buf(image, buffer);
             return 1;
+        case DRM_FORMAT_XRGB8888:
+        case DRM_FORMAT_ARGB8888:
+        case DRM_FORMAT_BGRA8888:
+            copy_rgb_to_dma_buf(image, buffer);
+            break;
 	}
 }
 
@@ -852,9 +873,15 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 		buffer->height = height * 3 / 2;
 		buffer->bpp = 16;
 		break;
+    case DRM_FORMAT_XRGB8888:
+    case DRM_FORMAT_ARGB8888:
+    case DRM_FORMAT_BGRA8888:
+		buffer->height = height;
+		buffer->bytes_per_pixel = 4;
 	default:
 		buffer->height = height;
 		buffer->bpp = 32;
+		buffer->bytes_per_pixel = 4;
 	}
 
 	if (!drm_dev->alloc_bo(buffer)) {
