@@ -35,6 +35,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <syslog.h>
 
 #include <linux/input.h>
 #include <wayland-client.h>
@@ -842,6 +843,9 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 	 */
 	buffer->height = height;
 
+	syslog(LOG_INFO,"buffer->width = %d , buffer->height = %d, buffer->stride = %ld \n",
+				buffer->width,buffer->height,buffer->stride);
+
 	params = zwp_linux_dmabuf_v1_create_params(app->dmabuf);
 	zwp_linux_buffer_params_v1_add(params,
 				       buffer->dmabuf_fd,
@@ -853,6 +857,7 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 
 	switch (format) {
 	case DRM_FORMAT_NV12:
+		syslog(LOG_INFO,"Inside DRM_FORMAT_NV12 -- add_buffer_params \n");
 		/* add the second plane params */
 		zwp_linux_buffer_params_v1_add(params,
 					       buffer->dmabuf_fd,
@@ -1108,11 +1113,13 @@ main(int argc, char *argv[])
 
 		case 'x':
 		default:
+			syslog(LOG_INFO,help_text, argv[0]);
 			return 0;
 		}
 	}
 
 	if( option_input_file == NULL) {
+		syslog(LOG_INFO,help_text, argv[0]);
 		return 0;
 	}
 
