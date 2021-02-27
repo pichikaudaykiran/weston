@@ -399,6 +399,59 @@ image_next_buffer(struct image *s)
 	return NULL;
 }
 
+// TODO : code is incomplete. Need to finish it */
+static void
+copy_yuv420p10_to_p010_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0, y_size = 0, u_size = 0, i = 0;
+
+    unsigned char *y_src = NULL, *u_src = NULL, *v_src = NULL;;
+    unsigned char *y_dst = NULL, *uv_dst = NULL;
+    unsigned char *src_buffer = NULL;
+
+    int bytes_per_pixel = 2;
+    assert(buffer->mmap);
+
+/*  YUV420P   -- This is a planar format. YYYYYYYY UU VV
+  0  -------------------
+	|                       |
+	|                       |
+	|                       |
+	|      Y -Plane         |
+	|                       |
+	|                       |
+	|                       |
+	 ------------------- w*h
+	|                       |
+	|     U - Plane         |
+	 ------------------- w*h/4
+	|                       |
+	|     V - Plane         |
+	 ------------------- w*h/4
+
+    YUV420 has 2 planes , Y, U, V.
+    Total Framesize = w* h + w*h/4+w*h/4
+*/
+    frame_size = buffer->width * buffer->height * bytes_per_pixel * 3/2;
+    y_size = buffer->width * buffer->height * bytes_per_pixel;
+    u_size = buffer->width * buffer->height/4 * bytes_per_pixel;
+
+    src_buffer = (unsigned char*)malloc(frame_size);
+    fread(src_buffer, 1, frame_size, image->fp);
+    y_src = src_buffer;
+    u_src = src_buffer + y_size; // U offset for yuv420
+    v_src = u_src + u_size; // V offset for yuv420
+
+    y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
+    uv_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // UV offset for P010
+
+    for (i = 0; i < buffer->height; i++) {
+        memcpy(y_dst, y_src, buffer->width * 2);
+        y_dst += buffer->stride;	// Doing the line by line copy. that is the reason, he is moving after buffer->stride
+        y_src += buffer->width * 2;
+    }
+}
+
 static void 
 copy_rgb_to_dma_buf(struct image *image, struct buffer *buffer)
 {
@@ -996,8 +1049,8 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 	 */
 	buffer->height = height;
 
-	syslog(LOG_INFO,"buffer->width = %d , buffer->height = %d, buffer->stride = %ld \n",
-				buffer->width,buffer->height,buffer->stride);
+	syslog(LOG_INFO,"buffer->width = %d , buffer->height = %d, buffer->stride = %ld, format = 0x%x \n",
+				buffer->width,buffer->height,buffer->stride, buffer->format);
 
 	params = zwp_linux_dmabuf_v1_create_params(app->dmabuf);
 	zwp_linux_buffer_params_v1_add(params,
