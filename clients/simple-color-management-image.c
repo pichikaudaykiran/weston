@@ -416,6 +416,96 @@ copy_rgb_to_dma_buf(struct image *image, struct buffer *buffer)
 }
 
 static void
+convert_yuv420pTonv12_and_copy_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    unsigned char *y_src = NULL, *u_src = NULL, *v_src = NULL;
+    unsigned char *y_dst = NULL, *uv_dst = NULL;
+    unsigned char *src_buffer = NULL;
+    int frame_size = 0, y_size = 0, u_size = 0;
+    int i = 0, row = 0, col = 0;
+
+    syslog(LOG_INFO, "%s \n",__func__);
+
+    y_size = buffer->width * buffer->height;
+    u_size = (buffer->width >> 1) * (buffer->height >> 1);
+    frame_size = buffer->width * buffer->height + ((buffer->width * buffer->height) >> 1);
+
+    syslog(LOG_INFO,"frame_size = %d, y_size = %d \n", frame_size, y_size);
+
+    src_buffer = (unsigned char*)malloc(frame_size);
+    fread(src_buffer, 1, frame_size, image->fp);
+
+    y_src = src_buffer;
+    u_src = y_src + y_size; // UV offset
+    v_src = y_src + y_size + u_size;
+
+    y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
+    uv_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // U offset for NV12
+
+    /* Y plane */
+    for (row = 0; row < buffer->height; row++) {
+        memcpy(y_dst, y_src, buffer->width);
+        y_dst += buffer->stride; // Doing the line by line copy based on buffer->stride
+        y_src += buffer->width;
+    }
+
+    /* UV plane */
+    for (row = 0; row < buffer->height / 2; row++) {
+        for (col = 0; col < buffer->width / 2; col++) {
+            uv_dst[col * 2] = u_src[col];
+            uv_dst[col * 2 + 1] = v_src[col];
+        }
+
+        uv_dst += buffer->stride;
+        u_src += (buffer->width / 2);
+        v_src += (buffer->width / 2);
+    }
+}
+
+static void 
+copy_yuv420_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0, y_size = 0;
+    int i = 0;
+
+    unsigned char *y_src = NULL, *u_src = NULL, v_src = NULL;
+    unsigned char *y_dst = NULL, *uv_dst = NULL;
+    unsigned char *src_buffer = NULL;
+
+    int bytes_per_pixel = 1;
+    assert(buffer->mmap);
+
+    frame_size = buffer->width * buffer->height  + ((buffer->width * buffer->height) >> 1);
+    y_size = buffer->width * buffer->height * bytes_per_pixel;
+
+    syslog(LOG_INFO,"frame_size = %d, y_size = %d \n", frame_size, y_size);
+
+    src_buffer = (unsigned char*)malloc(frame_size);
+    fread(src_buffer, 1, frame_size, image->fp);
+    y_src = src_buffer;
+    u_src = src_buffer + y_size; // UV offset for NV12
+    syslog(LOG_INFO,"src_buffer = %p, u_src = %p, difference = %d \n", src_buffer, u_src, u_src-src_buffer);
+
+    fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
+
+    y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
+    uv_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // U offset for P010
+    //uv_dst = (unsigned char*)buffer->mmap + buffer->width * buffer->height; // U offset for P010
+
+    for (i = 0; i < buffer->height; i++) {
+        memcpy(y_dst, y_src, buffer->width);
+        y_dst += buffer->stride;  // Doing the line by line copy based on buffer->stride
+        y_src += buffer->width;
+    }
+
+    for (i = 0; i < buffer->height >> 1; i++)  {
+        memcpy(uv_dst, u_src, buffer->width);
+        uv_dst += buffer->stride;
+        u_src += buffer->width;
+    }
+}
+
+static void
 copy_nv12_to_dma_buf(struct image *image, struct buffer *buffer)
 {
     int frame_size = 0, y_size = 0;
@@ -446,7 +536,7 @@ copy_nv12_to_dma_buf(struct image *image, struct buffer *buffer)
 
     for (i = 0; i < buffer->height; i++) {
       memcpy(y_dst, y_src, buffer->width);
-      y_dst += buffer->stride;  // Doing the line by line copy. that is the reason, he is moving after buffer->stride
+      y_dst += buffer->stride;  // Doing the line by line copy based on buffer->stride
       y_src += buffer->width;
     }
 
