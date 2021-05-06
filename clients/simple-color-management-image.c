@@ -97,13 +97,13 @@ static uint32_t option_width;
 static uint32_t option_height;
 
 static const struct weston_option options[] = {
-	{ WESTON_OPTION_BOOLEAN, "fullscreen", 'fs', &option_fullscreen },
-	{ WESTON_OPTION_BOOLEAN, "subtitle", 's', &option_subtitle },	
+	{ WESTON_OPTION_BOOLEAN, "fullscreen", 'f', &option_fullscreen },
+	{ WESTON_OPTION_BOOLEAN, "subtitle", 's', &option_subtitle },
 	{ WESTON_OPTION_STRING, "input_file", 'i', &option_input_file },
 	{ WESTON_OPTION_STRING, "pixel_format", 'p', &option_pixel_format },
 	{ WESTON_OPTION_INTEGER, "width", 'w', &option_width },
 	{ WESTON_OPTION_INTEGER, "height", 'h', &option_height },
-	{ WESTON_OPTION_STRING, "help", 'help', &option_help },
+	{ WESTON_OPTION_STRING, "help", 'x', &option_help },
 };
 
 static const char help_text[] =
@@ -118,10 +118,34 @@ static const char help_text[] =
 "                   P010 \n"
 "                   ARGB8888\n"
 "                   BGRA8888\n"
+"                   ABGR2101010\n"
+"                   ARGB2101010\n"
 "   -w, --width\t\tWidth of the input image file\n"
 "   -h, --height\t\tHeight of the input file\n"
 "   -x, --help\t\tShow this help text\n"
 "\n";
+
+
+/*  NV12/P010 YUV Layout
+
+    <----    WIDTH   ---->
+    +------------------------+ ^
+    |YYYYYYYYYYYYYYYYYYYY^^^^| |
+    |YYYYYYYYYYYYYYYYYYYY^^^^| H
+    |YYYYYYYYYYYYYYYYYYYY^^^^| E
+    |YYYYYYYYYYYYYYYYYYYY^^^^| I  Luma plane (Y)
+    |YYYYYYYYYYYYYYYYYYYY^^^^| G
+    |YYYYYYYYYYYYYYYYYYYY^^^^| H
+    |YYYYYYYYYYYYYYYYYYYY^^^^| T
+    |YYYYYYYYYYYYYYYYYYYY^^^^| |
+    +------------------------+ v
+    |UVUVUVUVUVUVUVUVUVUV^^^^|
+    |UVUVUVUVUVUVUVUVUVUV^^^^|    Chroma plane (UV)
+    |UVUVUVUVUVUVUVUVUVUV^^^^|
+    |UVUVUVUVUVUVUVUVUVUV^^^^|
+    +------------------------+
+    <----    ROW PITCH    --->
+*/
 
 struct app;
 struct buffer;
@@ -156,7 +180,7 @@ struct buffer {
 
 	int width;
 	int height;
-	int bpp;
+	int bpp;             // bits per pixel
 	unsigned long stride;
 	int format;
 	uint16_t bytes_per_pixel;
@@ -429,7 +453,7 @@ copy_yuv420p10_to_p010_to_dma_buf(struct image *image, struct buffer *buffer)
 	|     V - Plane         |
 	 ------------------- w*h/4
 
-    YUV420 has 2 planes , Y, U, V.
+    YUV420 has 3 planes , Y, U, V.
     Total Framesize = w* h + w*h/4+w*h/4
 */
     frame_size = buffer->width * buffer->height * bytes_per_pixel * 3/2;
@@ -475,9 +499,7 @@ convert_yuv420pTonv12_and_copy_to_dma_buf(struct image *image, struct buffer *bu
     unsigned char *y_dst = NULL, *uv_dst = NULL;
     unsigned char *src_buffer = NULL;
     int frame_size = 0, y_size = 0, u_size = 0;
-    int i = 0, row = 0, col = 0;
-
-    syslog(LOG_INFO, "%s \n",__func__);
+    int row = 0, col = 0;
 
     y_size = buffer->width * buffer->height;
     u_size = (buffer->width >> 1) * (buffer->height >> 1);
@@ -515,14 +537,17 @@ convert_yuv420pTonv12_and_copy_to_dma_buf(struct image *image, struct buffer *bu
     }
 }
 
+// TODO : This code is incomplete. Need to read the U and V planes separately
+// and copy them to destination
 static void 
 copy_yuv420_to_dma_buf(struct image *image, struct buffer *buffer)
 {
-    int frame_size = 0, y_size = 0;
+    int frame_size = 0, y_size = 0, u_size = 0;
     int i = 0;
+	uint32_t bytes_read = 0, file_size = 0;
 
-    unsigned char *y_src = NULL, *u_src = NULL, v_src = NULL;
-    unsigned char *y_dst = NULL, *uv_dst = NULL;
+    unsigned char *y_src = NULL, *u_src = NULL, *v_src = NULL;
+    unsigned char *y_dst = NULL, *u_dst = NULL, *v_dst = NULL;
     unsigned char *src_buffer = NULL;
 
     int bytes_per_pixel = 1;
@@ -530,20 +555,29 @@ copy_yuv420_to_dma_buf(struct image *image, struct buffer *buffer)
 
     frame_size = buffer->width * buffer->height  + ((buffer->width * buffer->height) >> 1);
     y_size = buffer->width * buffer->height * bytes_per_pixel;
+	u_size = buffer->width * (buffer->height/4) * bytes_per_pixel;
 
-    syslog(LOG_INFO,"frame_size = %d, y_size = %d \n", frame_size, y_size);
+	/* Even number of frames? */
+    fseek(image->fp, 0L, SEEK_END);
+    file_size = ftell(image->fp);
+    fseek(image->fp, 0L, SEEK_SET);
+
+    syslog(LOG_INFO,"file_size = %d, frame_size = %d, y_size = %d \n", file_size, frame_size, y_size);
 
     src_buffer = (unsigned char*)malloc(frame_size);
-    fread(src_buffer, 1, frame_size, image->fp);
+    bytes_read = fread(src_buffer, sizeof(uint8_t), frame_size, image->fp);
+	if(bytes_read < frame_size) {
+		syslog(LOG_ERR, "Failed to read full frame. bytes_read = %d \n", bytes_read);
+	}
     y_src = src_buffer;
-    u_src = src_buffer + y_size; // UV offset for NV12
-    syslog(LOG_INFO,"src_buffer = %p, u_src = %p, difference = %d \n", src_buffer, u_src, u_src-src_buffer);
+    u_src = src_buffer + y_size; // U offset
+    v_src = src_buffer + y_size + u_size; // V offset
 
     fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
 
     y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
-    uv_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // U offset for P010
-    //uv_dst = (unsigned char*)buffer->mmap + buffer->width * buffer->height; // U offset for P010
+    u_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // U offset
+    v_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height * 5/4; // V offset
 
     for (i = 0; i < buffer->height; i++) {
         memcpy(y_dst, y_src, buffer->width);
@@ -551,10 +585,16 @@ copy_yuv420_to_dma_buf(struct image *image, struct buffer *buffer)
         y_src += buffer->width;
     }
 
-    for (i = 0; i < buffer->height >> 1; i++)  {
-        memcpy(uv_dst, u_src, buffer->width);
-        uv_dst += buffer->stride;
+    for (i = 0; i < buffer->height/4; i++)  {
+        memcpy(u_dst, u_src, buffer->width);
+        u_dst += buffer->stride;
         u_src += buffer->width;
+    }
+
+    for (i = 0; i < buffer->height/4; i++)  {
+        memcpy(v_dst, v_src, buffer->width);
+        v_dst += buffer->stride;
+        v_src += buffer->width;
     }
 }
 
@@ -564,72 +604,110 @@ copy_nv12_to_dma_buf(struct image *image, struct buffer *buffer)
     int frame_size = 0, y_size = 0;
     int i = 0;
 
-    unsigned char *y_src = NULL, *u_src = NULL;
+    unsigned char *y_src = NULL, *uv_src = NULL;
     unsigned char *y_dst = NULL, *uv_dst = NULL;
     unsigned char *src_buffer = NULL;
 
-    assert(buffer->mmap);
+    uint32_t bytes_read = 0, file_size = 0;
 
+    assert(buffer->mmap);
     frame_size = buffer->width * buffer->height  + ((buffer->width * buffer->height) >> 1);
     y_size = buffer->width * buffer->height;
 
-    syslog(LOG_INFO,"frame_size = %d, y_size = %d \n", frame_size, y_size);
+	/* Even number of frames? */
+    fseek(image->fp, 0L, SEEK_END);
+    file_size = ftell(image->fp);
+    fseek(image->fp, 0L, SEEK_SET);
+
+    syslog(LOG_INFO,"file_size = %d, frame_size = %d, y_size = %d \n", file_size, frame_size, y_size);
 
     src_buffer = (unsigned char*)malloc(frame_size);
-    fread(src_buffer, 1, frame_size, image->fp);
-    y_src = src_buffer;
-    u_src = src_buffer + y_size; // UV offset for NV12
-    syslog(LOG_INFO,"src_buffer = %p, u_src = %p, difference = %d \n", src_buffer, u_src, u_src-src_buffer);
+    bytes_read = fread(src_buffer, sizeof(uint8_t), frame_size, image->fp);
+    if(bytes_read < frame_size) {
+        syslog(LOG_ERR, "Failed to read full frame. bytes_read = %d \n", bytes_read);
+    }
+
+    y_src = src_buffer + 0;
+    uv_src = src_buffer + y_size; // UV offset for NV12
 
     fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
 
     y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
-    uv_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // U offset for P010
-    //uv_dst = (unsigned char*)buffer->mmap + buffer->width * buffer->height; // U offset for P010
+    uv_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // UV offset for NV12
 
     for (i = 0; i < buffer->height; i++) {
       memcpy(y_dst, y_src, buffer->width);
-      y_dst += buffer->stride;  // Doing the line by line copy based on buffer->stride
+      y_dst += buffer->stride;  // line by line copy based on buffer->stride
       y_src += buffer->width;
     }
 
     for (i = 0; i < buffer->height >> 1; i++)  {
-      memcpy(uv_dst, u_src, buffer->width);
+      memcpy(uv_dst, uv_src, buffer->width);
       uv_dst += buffer->stride;
-      u_src += buffer->width;
+      uv_src += buffer->width;
+    }
+}
+
+static void
+copy_p010_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0, y_size = 0;
+    int i = 0;
+
+    unsigned char *y_src = NULL, *uv_src = NULL;
+    unsigned char *y_dst = NULL, *uv_dst = NULL;
+    unsigned char *src_buffer = NULL;
+	int bytes_per_pixel = 2;
+
+    assert(buffer->mmap);
+
+    y_size = buffer->width * buffer->height * 2;
+
+    frame_size = buffer->width * buffer->height * bytes_per_pixel * 3/2;
+
+    src_buffer = (unsigned char*)malloc(frame_size);
+    fread(src_buffer, sizeof(uint8_t), frame_size, image->fp);
+
+    y_src = src_buffer;
+    uv_src = src_buffer + y_size; // UV offset for P010
+
+    fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
+
+    y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
+    uv_dst = (unsigned char*)buffer->mmap + (buffer->stride * buffer->height); // UV offset for P010
+
+    for (i = 0; i < buffer->height; i++) {
+      memcpy(y_dst, y_src, buffer->width * bytes_per_pixel);
+      y_dst += buffer->stride;  // Doing the line by line copy based on buffer->stride
+      y_src += buffer->width * bytes_per_pixel;
+    }
+
+    for (i = 0; i < buffer->height >> 1; i++)  {
+      memcpy(uv_dst, uv_src, buffer->width * bytes_per_pixel);
+      uv_dst += buffer->stride;
+      uv_src += buffer->width * bytes_per_pixel;
     }
 }
 
 static void
 fill_buffer(struct buffer *buffer, struct image *image)
 {
-    int i = 0;
-    int height;
-    int plane_heights[4] = {0};
-    int offsets[4] = {0};
-    int n_planes = 0;
-    syslog(LOG_INFO,"%s \n",__func__);
 
     switch (buffer->format) {
         case DRM_FORMAT_YUV420:
-            plane_heights[0] = buffer->height;
-            plane_heights[1] = buffer->height / 2;
-            plane_heights[2] = buffer->height / 2;
-            offsets[0] = 0;
-            offsets[1] = buffer->height;
-            offsets[2] = buffer->height * 3 / 2;
-            n_planes = 3;
+            copy_yuv420_to_dma_buf(image, buffer);
             break;
         case DRM_FORMAT_P010:
-            // In this case, the input file has pixel format of YUV420.
-            //copy_yuv420p10_to_p010_to_dma_buf(image, buffer);
-            //return 1;
+            copy_p010_to_dma_buf(image, buffer);
+            return ;
         case DRM_FORMAT_NV12:
             copy_nv12_to_dma_buf(image, buffer);
-            return 1;
+            return ;
         case DRM_FORMAT_XRGB8888:
         case DRM_FORMAT_ARGB8888:
         case DRM_FORMAT_BGRA8888:
+        case DRM_FORMAT_ARGB2101010:
+        case DRM_FORMAT_ABGR2101010:
             copy_rgb_to_dma_buf(image, buffer);
             break;
 	}
@@ -1009,7 +1087,7 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 		buffer->bpp = 8;
 		break;
 	case DRM_FORMAT_YUV420:
-		buffer->height = height * 2;
+		buffer->height = height * 3 / 2;
 		buffer->bpp = 8;
 		break;
 	case DRM_FORMAT_P010:
@@ -1019,13 +1097,15 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
     case DRM_FORMAT_XRGB8888:
     case DRM_FORMAT_ARGB8888:
     case DRM_FORMAT_BGRA8888:
-		buffer->height = height;
-		buffer->bytes_per_pixel = 4;
-	default:
-		buffer->height = height;
-		buffer->bpp = 32;
-		buffer->bytes_per_pixel = 4;
-	}
+    case DRM_FORMAT_ARGB2101010:
+    case DRM_FORMAT_ABGR2101010:
+        buffer->height = height;
+        buffer->bytes_per_pixel = 4;
+    default:
+        buffer->height = height;
+        buffer->bpp = 32;
+        buffer->bytes_per_pixel = 4;
+    }
 
 	if (!drm_dev->alloc_bo(buffer)) {
 		fprintf(stderr, "alloc_bo failed\n");
@@ -1063,7 +1143,6 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 
 	switch (format) {
 	case DRM_FORMAT_NV12:
-		syslog(LOG_INFO,"Inside DRM_FORMAT_NV12 -- add_buffer_params \n");
 		/* add the second plane params */
 		zwp_linux_buffer_params_v1_add(params,
 					       buffer->dmabuf_fd,
@@ -1198,7 +1277,6 @@ image_create(struct display *display, const char *filename)
 		return NULL;
 	}
 
-	fprintf(stderr, "zwp_color_management_surface_v1_set_color_space\n");
 	zwp_color_management_surface_v1_set_color_space(
 			app->cm_surface,
 			app->color_space,
@@ -1260,6 +1338,10 @@ static int parse_pixel_format(const char* c)
 			return DRM_FORMAT_ARGB8888;
 		else if (!strcmp(c, "BGRA8888"))
 			return DRM_FORMAT_BGRA8888;
+		else if (!strcmp(c, "ABGR2101010"))
+			return DRM_FORMAT_ABGR2101010;
+		else if (!strcmp(c, "ARGB2101010"))
+			return DRM_FORMAT_ARGB2101010;
 		else if (!strcmp(c, "P010"))
 			return DRM_FORMAT_P010;
 	}
@@ -1281,20 +1363,19 @@ main(int argc, char *argv[])
 	struct display *display;
 	struct app *app;
 
-	int r, c, option_index, long_options;
-	int pix_fmt = DRM_FORMAT_XRGB8888;
-	
+	int c, option_index, long_options;
+
     while ((c = getopt_long(argc, argv, "f:s:i:p:w:h:x:",
-				  long_options, &option_index)) != -1) {
-		switch (c) {			
-		case 'f':
+                   long_options, &option_index)) != -1) {
+		switch (c) {
+        case 'f':
 			if (is_true(optarg))
 				option_fullscreen = 1;
 			else
 				option_fullscreen = 0;
 			break;
 			
-		case 's':
+        case 's':
 			if (is_true(optarg))
 				option_subtitle = 1;
 			else
@@ -1337,7 +1418,7 @@ main(int argc, char *argv[])
 
 	if (!display_has_subcompositor(display)) {
 		fprintf(stderr, "compositor does not support "
-			"the subcompositor extension\n");
+                        "the subcompositor extension\n");
 		return -1;
 	}
 

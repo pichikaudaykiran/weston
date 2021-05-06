@@ -35,6 +35,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <syslog.h>
 
 #include <linux/input.h>
 #include <wayland-client.h>
@@ -57,6 +58,7 @@
 #include <pango/pangocairo.h>
 #endif
 
+#include "color-management-unstable-v1-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 
 #include "shared/os-compatibility.h"
@@ -90,19 +92,38 @@
 static int32_t option_help;
 static int32_t option_fullscreen;
 static int32_t option_subtitle;
+static char* option_input_file;
+static uint32_t option_pixel_format;
+static uint32_t option_width;
+static uint32_t option_height;
 
 static const struct weston_option options[] = {
 	{ WESTON_OPTION_BOOLEAN, "fullscreen", 'f', &option_fullscreen },
 	{ WESTON_OPTION_BOOLEAN, "subtitle", 's', &option_subtitle },
-	{ WESTON_OPTION_BOOLEAN, "help", 'h', &option_help },
+	{ WESTON_OPTION_STRING, "input_file", 'i', &option_input_file },
+	{ WESTON_OPTION_STRING, "pixel_format", 'p', &option_pixel_format },
+	{ WESTON_OPTION_INTEGER, "width", 'w', &option_width },
+	{ WESTON_OPTION_INTEGER, "height", 'h', &option_height },
+	{ WESTON_OPTION_STRING, "help", 'x', &option_help },
 };
 
 static const char help_text[] =
 "Usage: %s [options] FILENAME\n"
 "\n"
-"  -f, --fullscreen\t\tRun in fullscreen mode\n"
-"  -s, --subtitle\t\tShow subtiles\n"
-"  -h, --help\t\tShow this help text\n"
+"   -f, --fullscreen\tRun in fullscreen mode\n"
+"   -s, --subtitle\tShow subtiles\n"
+"   -i, --input\t\tInput Image file to render\n"
+"   -p, --pix_fmt\tImage pixel format\n"
+"                   YUV420 \n"
+"                   NV12\n"
+"                   P010 \n"
+"                   ARGB8888\n"
+"                   BGRA8888\n"
+"                   ABGR2101010\n"
+"                   ARGB2101010\n"
+"   -w, --width\t\tWidth of the input image file\n"
+"   -h, --height\t\tHeight of the input file\n"
+"   -x, --help\t\tShow this help text\n"
 "\n";
 
 struct app;
@@ -122,6 +143,7 @@ struct buffer {
 	int bpp;
 	unsigned long stride;
 	int format;
+	uint16_t bytes_per_pixel;
 	AVFrame *prev_frame;
 
 	struct gbm_device *gbm;
@@ -162,6 +184,9 @@ struct app {
 
 	struct subtitle *subtitle;
 
+	struct zwp_color_manager_v1 *color_manager;
+	struct zwp_color_space_v1 *color_space;
+	struct zwp_color_management_surface_v1 *cm_surface;
 	struct zwp_linux_dmabuf_v1 *dmabuf;
 };
 
@@ -379,6 +404,12 @@ static uint32_t av_format_to_drm_format(int format)
 	case AV_PIX_FMT_YUV420P16BE:
 	case AV_PIX_FMT_YUV420P16LE:
 		return DRM_FORMAT_P016;
+    case AV_PIX_FMT_ARGB:
+        return DRM_FORMAT_ARGB8888;
+    case AV_PIX_FMT_RGBA:
+        return DRM_FORMAT_RGBA8888;
+    case AV_PIX_FMT_0RGB:
+        return DRM_FORMAT_XRGB8888;
 	default:
 		return -1;
 	}
@@ -450,40 +481,96 @@ video_next_buffer(struct video *s)
 }
 
 static void
-copy_420p10_to_p010(struct buffer *buffer, AVFrame *frame)
+copy_rgb_to_dma_buf(struct buffer *buffer, AVFrame *frame)
 {
-	int height, linesize;
-	uint16_t *yplane, *dsty, *uplane, *vplane, *dstuv;
-	int size;
+	int frame_size = 0;
+	unsigned char *src_data = NULL;
+	unsigned char *dst_data = NULL;
 
-	// copy plane 0
-	height = buffer->height;
-	yplane = (uint16_t *) frame->data[0];
-	dsty = (uint16_t *) buffer->mmap;
-	linesize = frame->linesize[0];
+	src_data = (unsigned char *) frame->data[0];
 
-	size = (linesize * height) / 2;
-	// bitshift and copy y plane
-	for (int i = 0; i < size; i++) {
-		dsty[i] = yplane[i] << 6;
+	assert(buffer->mmap);
+	frame_size = buffer->width * buffer->height * buffer->bytes_per_pixel;
+
+	dst_data = (unsigned char*)buffer->mmap + 0;
+	memcpy(dst_data, src_data, frame_size);
+}
+
+static void
+copy_nv12_to_dma_buf(struct buffer *buffer, AVFrame *frame)
+{
+	int i ,linesize ,height;
+	int plane_heights[2] = {0};
+	int offsets[2]   = {0};
+
+	plane_heights[0] = frame->height;
+	plane_heights[1] = frame->height/2;
+
+	offsets[0] = 0;
+	offsets[1] = frame->height;
+
+	uint8_t * src = (uint8_t *) frame->data[0];
+	uint8_t * dst = (uint8_t *) buffer->mmap;
+
+	printf("%s: dst : %p, width %d height %d, lineSize[0] : %d, lineSize[] : %d bytes \n", __func__,
+		dst, frame->width, frame->height,frame->linesize[0],frame->linesize[1] );
+
+	for (i = 0; i < 2; i++) {
+		height = plane_heights[i];
+		linesize = frame->linesize[i];
+
+		src = frame->data[i];
+		dst = buffer->mmap + buffer->stride * offsets[i];
+
+		for (;height > 0; height--) {
+			memcpy(dst, src, linesize);
+			dst += buffer->stride;
+			src += linesize;
+		}
 	}
 
-	// copy plane 1 and 2 alternatingly from source
-	height = buffer->height / 2;
-	uplane = (uint16_t *) frame->data[1];
-	vplane = (uint16_t *) frame->data[2];
-	dstuv = (uint16_t *) (buffer->mmap + buffer->stride * buffer->height);
+}
 
-	// both uplane and vplane would have same linesize
-	linesize = frame->linesize[1];
+static void
+copy_yuv420p10_to_p010(struct buffer *buffer, AVFrame *frame)
+{
+    int height, linesize;
+    uint16_t *yplane, *dsty, *uplane, *vplane, *dstuv;
+    int uv_size, y_size, size;
 
-	size = (linesize * height) / 2;
+    size = av_image_get_buffer_size(frame->format, frame->width, frame->height, 1);
+    syslog(LOG_INFO,"frame->size = %d \n",size);
 
-	// bit shift and copy u, v alternatingly
-	for (int i = 0; i < size; i++) {
-		dstuv[2 * i] = uplane[i] << 6;
-		dstuv[(2 * i) + 1] = vplane[i] << 6;
-	}
+    // copy plane 0
+    height = buffer->height;
+    yplane = (uint16_t *) frame->data[0];
+    dsty = (uint16_t *) buffer->mmap;
+    linesize = frame->linesize[0];  // Linesize is calculated after padding
+
+    y_size = (linesize/2) * height; // linesize is in byte size and hence /2
+    // bitshift and copy y plane
+    for (int i = 0; i < y_size; i++) {
+        dsty[i] = yplane[i] << 6;
+    }
+    syslog(LOG_INFO,"linesize = %d, y_size = %d, height= %d \n", linesize, y_size, height);
+
+    // copy plane 1 and 2 alternatively from source
+    height = buffer->height / 2;
+    uplane = (uint16_t *) frame->data[1];
+    vplane = (uint16_t *) frame->data[2];
+    dstuv = (uint16_t *) (buffer->mmap + buffer->stride * buffer->height);
+
+    // both uplane and vplane would have same linesize
+    linesize = frame->linesize[1];
+
+    uv_size = (linesize * height) / 2;
+
+    // bit shift and copy u, v alternatively. As we are copying alternatively from different planes
+    // size of uv plane double than uv_size.
+    for (int i = 0; i < uv_size; i++) {
+        dstuv[2 * i] = uplane[i] << 6;
+        dstuv[(2 * i) + 1] = vplane[i] << 6; 
+    }
 }
 
 static int
@@ -497,28 +584,38 @@ fill_buffer(struct buffer *buffer, AVFrame *frame) {
 	int i;
 	void *map_data = NULL;
 	uint32_t dst_stride;
+	uint32_t w = gbm_bo_get_width(buffer->bo);
+	uint32_t h = gbm_bo_get_height(buffer->bo);
 
-	buffer->mmap = gbm_bo_map(buffer->bo, 0, 0, buffer->width, buffer->height,
+	buffer->mmap = gbm_bo_map(buffer->bo, 0, 0, w, h,
 				  GBM_BO_TRANSFER_WRITE, &dst_stride, &map_data);
 	if (!buffer->mmap) {
 		fprintf(stderr, "Unable to mmap buffer\n");
 		return 0;
 	}
 
-	switch (buffer->format) {
-	case DRM_FORMAT_YUV420:
-		plane_heights[0] = buffer->height;
-		plane_heights[1] = buffer->height / 2;
-		plane_heights[2] = buffer->height / 2;
-		offsets[0] = 0;
-		offsets[1] = buffer->height;
-		offsets[2] = buffer->height * 3 / 2;
-		n_planes = 3;
-		break;
-	case DRM_FORMAT_P010:
-		copy_420p10_to_p010(buffer, frame);
-		gbm_bo_unmap(buffer->bo, map_data);
-		return 1;
+    switch (buffer->format) {
+        case DRM_FORMAT_YUV420:
+            plane_heights[0] = buffer->height;
+            plane_heights[1] = buffer->height / 2;
+            plane_heights[2] = buffer->height / 2;
+            offsets[0] = 0;
+            offsets[1] = buffer->height;
+            offsets[2] = buffer->height * 3 / 2;
+            n_planes = 3;
+            break;
+        case DRM_FORMAT_P010:
+		copy_yuv420p10_to_p010(buffer, frame);
+		    gbm_bo_unmap(buffer->bo, map_data);
+            return 1;
+        case DRM_FORMAT_XRGB8888:
+        case DRM_FORMAT_ARGB8888:
+        case DRM_FORMAT_BGRA8888:
+        case DRM_FORMAT_ARGB2101010:
+        case DRM_FORMAT_ABGR2101010:
+            copy_rgb_to_dma_buf(buffer, frame);
+		    gbm_bo_unmap(buffer->bo, map_data);
+            return 1;
 	}
 
 	for (i = 0; i < n_planes; i++) {
@@ -806,7 +903,11 @@ global_handler(struct display *display, uint32_t id,
 
 	struct app *app = data;
 
-	if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0) {
+	if (strcmp(interface, "zwp_color_manager_v1") == 0) {
+		app->color_manager =
+			display_bind(display, id,
+				     &zwp_color_manager_v1_interface, 1);
+	} else if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0) {
 		if (version < 3)
 			return;
 		app->dmabuf =
@@ -867,6 +968,10 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 	buffer->width = width;
 	buffer->height = height;
 	buffer->format = format;
+    buf_w = width;
+    buf_h = height;
+    buffer->cpp = 1;
+    buffer->bytes_per_pixel = 4;
 
 	switch (format) {
 	case DRM_FORMAT_NV12:
@@ -887,15 +992,19 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 		buf_h = height * 3 / 2;
 		buffer->cpp = 2;
 		break;
+	case DRM_FORMAT_XRGB8888:
 	case DRM_FORMAT_ARGB8888:
+	case DRM_FORMAT_BGRA8888:
 		pixel_format = GBM_FORMAT_ARGB8888;
-		buf_w = width;
-		buf_h = height;
-		buffer->cpp = 1;
+		break;
+	case DRM_FORMAT_ARGB2101010:
+		pixel_format = GBM_FORMAT_ARGB2101010;
+		break;
+	case DRM_FORMAT_ABGR2101010:
+		pixel_format = GBM_FORMAT_ABGR2101010;
 		break;
 	default:
-		buffer->height = height;
-		buffer->cpp = 1;
+		fprintf(stderr, "error: unable to set the pixel_format\n");
 	}
 
 	buffer->bo = gbm_bo_create_with_modifiers(buffer->gbm, buf_w, buf_h, pixel_format, &modifier, 1);
@@ -1018,6 +1127,38 @@ video_create(struct display *display, const char *filename)
 	if (!video_open(app, &app->video, filename))
 		goto err;
 
+	if (app->color_manager == NULL) {
+		fprintf(stderr, "error: No color manager global \n");
+		free(app);
+		return NULL;
+	}
+
+	app->cm_surface = zwp_color_manager_v1_get_color_management_surface(
+					app->color_manager,
+					widget_get_wl_surface(app->widget)); // surface
+	if (app->cm_surface == NULL) {
+		fprintf(stderr, "error: cm_surface is NULL \n");
+		free(app);
+		return NULL;
+	}
+
+	app->color_space = zwp_color_manager_v1_create_color_space_from_names(app->color_manager,
+			ZWP_COLOR_MANAGER_V1_EOTF_NAMES_SRGB, // EOTF
+			ZWP_COLOR_MANAGER_V1_CHROMATICITY_NAMES_BT709, // Chromaticity
+			ZWP_COLOR_MANAGER_V1_WHITEPOINT_NAMES_D65 //Whitepoint
+			);
+	if (app->color_space == NULL) {
+		fprintf(stderr, "error: color_space is NULL \n");
+		free(app);
+		return NULL;
+	}
+
+	zwp_color_management_surface_v1_set_color_space(
+			app->cm_surface,
+			app->color_space,
+			ZWP_COLOR_MANAGEMENT_SURFACE_V1_RENDER_INTENT_RELATIVE,
+			ZWP_COLOR_MANAGEMENT_SURFACE_V1_ALPHA_MODE_STRAIGHT);
+
 	if (option_subtitle)
 		app->subtitle = subtitle_create(app);
 
@@ -1060,14 +1201,87 @@ video_destroy(struct app *app)
 	free(app);
 }
 
+static int parse_pixel_format(const char* c)
+{
+	if (c != NULL) {
+		if (!strcmp(c, "YUV420"))
+			return DRM_FORMAT_YUV420;
+		else if (!strcmp(c, "NV12"))
+			return DRM_FORMAT_NV12;
+		else if (!strcmp(c, "XRGB8888"))
+			return DRM_FORMAT_XRGB8888;
+		else if (!strcmp(c, "ARGB8888"))
+			return DRM_FORMAT_ARGB8888;
+		else if (!strcmp(c, "BGRA8888"))
+			return DRM_FORMAT_BGRA8888;
+		else if (!strcmp(c, "ABGR2101010"))
+			return DRM_FORMAT_ABGR2101010;
+		else if (!strcmp(c, "ARGB2101010"))
+			return DRM_FORMAT_ARGB2101010;
+		else if (!strcmp(c, "P010"))
+			return DRM_FORMAT_P010;
+	}
+	return DRM_FORMAT_XRGB8888;
+}
+
+static int
+is_true(const char* c)
+{
+	int ret = 0;
+	if (c != NULL && ((c[0] ==  '1') || !strcasecmp(c, "true")))
+		ret = 1;
+	return ret;
+}
+
 int
 main(int argc, char *argv[])
 {
 	struct display *display;
 	struct app *app;
 
-	parse_options(options, ARRAY_LENGTH(options), &argc, argv);
-	if (option_help) {
+	int c, option_index, long_options;
+
+    while ((c = getopt_long(argc, argv, "f:s:i:p:w:h:x:",
+                   long_options, &option_index)) != -1) {
+		switch (c) {
+			case 'f':
+				if (is_true(optarg))
+					option_fullscreen = 1;
+				else
+					option_fullscreen = 0;
+				break;
+
+			case 's':
+				if (is_true(optarg))
+					option_subtitle = 1;
+				else
+					option_subtitle = 0;
+				break;
+
+			case 'i':
+				option_input_file = optarg;
+				break;
+
+			case 'w':
+				option_width = atoi(optarg);
+				break;
+
+			case 'h':
+				option_height = atoi(optarg);
+				break;
+
+			case 'p':
+				option_pixel_format = parse_pixel_format(optarg);
+				break;
+
+			case 'x':
+			default:
+				printf(help_text, argv[0]);
+				return 0;
+		}
+	}
+
+	if( option_input_file == NULL) {
 		printf(help_text, argv[0]);
 		return 0;
 	}
@@ -1084,7 +1298,7 @@ main(int argc, char *argv[])
 		return -1;
 	}
 
-	app = video_create(display, argv[argc - 1]);
+	app = video_create(display, option_input_file);
 	if (!app) {
 		fprintf(stderr, "Failed to initialize!");
 		exit(EXIT_FAILURE);

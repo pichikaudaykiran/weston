@@ -36,6 +36,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <glib.h>
+#include <syslog.h>
 
 #include <linux/input.h>
 #include <wayland-client.h>
@@ -88,20 +89,61 @@
 static int32_t option_help;
 static int32_t option_fullscreen;
 static int32_t option_subtitle;
+static char* option_input_file;
+static uint32_t option_pixel_format;
+static uint32_t option_width;
+static uint32_t option_height;
 
 static const struct weston_option options[] = {
 	{ WESTON_OPTION_BOOLEAN, "fullscreen", 'f', &option_fullscreen },
 	{ WESTON_OPTION_BOOLEAN, "subtitle", 's', &option_subtitle },
-	{ WESTON_OPTION_BOOLEAN, "help", 'h', &option_help },
+	{ WESTON_OPTION_STRING, "input_file", 'i', &option_input_file },
+	{ WESTON_OPTION_STRING, "pixel_format", 'p', &option_pixel_format },
+	{ WESTON_OPTION_INTEGER, "width", 'w', &option_width },
+	{ WESTON_OPTION_INTEGER, "height", 'h', &option_height },
+	{ WESTON_OPTION_STRING, "help", 'x', &option_help },
 };
 
 static const char help_text[] =
 "Usage: %s [options] FILENAME\n"
 "\n"
-"  -f, --fullscreen\t\tRun in fullscreen mode\n"
-"  -s, --subtitle\t\tShow subtiles\n"
-"  -h, --help\t\tShow this help text\n"
+"   -f, --fullscreen\tRun in fullscreen mode\n"
+"   -s, --subtitle\tShow subtiles\n"
+"   -i, --input\t\tInput Image file to render\n"
+"   -p, --pix_fmt\tImage pixel format\n"
+"                   YUV420 \n"
+"                   NV12\n"
+"                   P010 \n"
+"                   ARGB8888\n"
+"                   BGRA8888\n"
+"                   ABGR2101010\n"
+"                   ARGB2101010\n"
+"   -w, --width\t\tWidth of the input image file\n"
+"   -h, --height\t\tHeight of the input file\n"
+"   -x, --help\t\tShow this help text\n"
 "\n";
+
+
+/*  NV12/P010 YUV Layout
+
+    <----    WIDTH   ---->
+    +------------------------+ ^
+    |YYYYYYYYYYYYYYYYYYYY^^^^| |
+    |YYYYYYYYYYYYYYYYYYYY^^^^| H
+    |YYYYYYYYYYYYYYYYYYYY^^^^| E
+    |YYYYYYYYYYYYYYYYYYYY^^^^| I  Luma plane (Y)
+    |YYYYYYYYYYYYYYYYYYYY^^^^| G
+    |YYYYYYYYYYYYYYYYYYYY^^^^| H
+    |YYYYYYYYYYYYYYYYYYYY^^^^| T
+    |YYYYYYYYYYYYYYYYYYYY^^^^| |
+    +------------------------+ v
+    |UVUVUVUVUVUVUVUVUVUV^^^^|
+    |UVUVUVUVUVUVUVUVUVUV^^^^|    Chroma plane (UV)
+    |UVUVUVUVUVUVUVUVUVUV^^^^|
+    |UVUVUVUVUVUVUVUVUVUV^^^^|
+    +------------------------+
+    <----    ROW PITCH    --->
+*/
 
 struct app;
 struct buffer;
@@ -117,9 +159,10 @@ struct buffer {
 
 	int width;
 	int height;
-	int bpp;
+	int bpp;             // bits per pixel
 	unsigned long stride;
 	int format;
+	uint16_t bytes_per_pixel;
 
 	struct gbm_device *gbm;
 	int cpp;
@@ -369,43 +412,249 @@ image_next_buffer(struct image *s)
 	return NULL;
 }
 
+// TODO : code is incomplete. Need to finish it */
 static void
-fill_buffer(struct buffer *buffer, struct image *image) {
-	int i = 0;
+copy_yuv420p10_to_p010_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0, y_size = 0, u_size = 0, i = 0;
 
-	int frame_size = 0, y_size = 0;
+    unsigned char *y_src = NULL, *u_src = NULL, *v_src = NULL;;
+    unsigned char *y_dst = NULL, *uv_dst = NULL;
+    unsigned char *src_buffer = NULL;
 
-	unsigned char *y_src = NULL, *u_src = NULL;
-	unsigned char *y_dst = NULL, *u_dst = NULL;
-	unsigned char *src_buffer = NULL;
+    int bytes_per_pixel = 2;
+    assert(buffer->mmap);
 
-	int bytes_per_pixel = 2;
-	assert(buffer->mmap);
+/*  YUV420P   -- This is a planar format. YYYYYYYY UU VV
+  0  -------------------
+	|                       |
+	|                       |
+	|                       |
+	|      Y -Plane         |
+	|                       |
+	|                       |
+	|                       |
+	 ------------------- w*h
+	|                       |
+	|     U - Plane         |
+	 ------------------- w*h/4
+	|                       |
+	|     V - Plane         |
+	 ------------------- w*h/4
 
-        frame_size = buffer->width * buffer->height * bytes_per_pixel * 3 / 2;
-        y_size = buffer->width * buffer->height * bytes_per_pixel;
+    YUV420 has 3 planes , Y, U, V.
+    Total Framesize = w* h + w*h/4+w*h/4
+*/
+    frame_size = buffer->width * buffer->height * bytes_per_pixel * 3/2;
+    y_size = buffer->width * buffer->height * bytes_per_pixel;
+    u_size = buffer->width * buffer->height/4 * bytes_per_pixel;
 
-        src_buffer = (unsigned char*)malloc(frame_size);
-        fread(src_buffer, 1, frame_size, image->fp);
-        y_src = src_buffer;
-        u_src = src_buffer + y_size; // UV offset for P010
+    src_buffer = (unsigned char*)malloc(frame_size);
+    fread(src_buffer, 1, frame_size, image->fp);
+    y_src = src_buffer;
+    u_src = src_buffer + y_size; // U offset for yuv420
+    v_src = u_src + u_size; // V offset for yuv420
 
-	fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
+    y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
+    uv_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // UV offset for P010
 
-        y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
-        u_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // U offset for P010
+    for (i = 0; i < buffer->height; i++) {
+        memcpy(y_dst, y_src, buffer->width * 2);
+        y_dst += buffer->stride;	// Doing the line by line copy. that is the reason, he is moving after buffer->stride
+        y_src += buffer->width * 2;
+    }
+}
 
-        for (i = 0; i < buffer->height; i++) {
-		memcpy(y_dst, y_src, buffer->width * 2);
-		y_dst += buffer->stride;
-		y_src += buffer->width * 2;
-        }
+static void
+copy_rgb_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0;
+    unsigned char *src_buffer = NULL;
+    unsigned char *dst_buffer = NULL;
 
-        for (i = 0; i < buffer->height >> 1; i++)  {
-		memcpy(u_dst, u_src, buffer->width * 2);
-		u_dst += buffer->stride;
-		u_src += buffer->width * 2;
-        }
+    assert(buffer->mmap);
+    frame_size = buffer->width * buffer->height * buffer->bytes_per_pixel;
+    src_buffer = (unsigned char*)malloc(frame_size);
+    fread(src_buffer, 1, frame_size, image->fp);
+
+    dst_buffer = (unsigned char*)buffer->mmap + 0;
+    memcpy(dst_buffer, src_buffer, frame_size);
+}
+
+// TODO : This code is incomplete. Need to read the U and V planes separately
+// and copy them to destination
+static void
+copy_yuv420_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0, y_size = 0, u_size = 0;
+    int i = 0;
+	uint32_t bytes_read = 0, file_size = 0;
+
+    unsigned char *y_src = NULL, *u_src = NULL, *v_src = NULL;
+    unsigned char *y_dst = NULL, *u_dst = NULL, *v_dst = NULL;
+    unsigned char *src_buffer = NULL;
+
+    int bytes_per_pixel = 1;
+    assert(buffer->mmap);
+
+    frame_size = buffer->width * buffer->height  + ((buffer->width * buffer->height) >> 1);
+    y_size = buffer->width * buffer->height * bytes_per_pixel;
+	u_size = buffer->width * (buffer->height/4) * bytes_per_pixel;
+
+    /* Even number of frames? */
+    fseek(image->fp, 0L, SEEK_END);
+    file_size = ftell(image->fp);
+    fseek(image->fp, 0L, SEEK_SET);
+
+    syslog(LOG_INFO,"file_size = %d, frame_size = %d, y_size = %d \n", file_size, frame_size, y_size);
+
+    src_buffer = (unsigned char*)malloc(frame_size);
+    bytes_read = fread(src_buffer, sizeof(uint8_t), frame_size, image->fp);
+    if(bytes_read < frame_size) {
+        syslog(LOG_ERR, "Failed to read full frame. bytes_read = %d \n", bytes_read);
+    }
+    y_src = src_buffer;
+    u_src = src_buffer + y_size; // U offset
+    v_src = src_buffer + y_size + u_size; // V offset
+
+    fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
+
+    y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
+    u_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // U offset
+    v_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height * 5/4; // V offset
+
+    for (i = 0; i < buffer->height; i++) {
+        memcpy(y_dst, y_src, buffer->width);
+        y_dst += buffer->stride;  // Doing the line by line copy based on buffer->stride
+        y_src += buffer->width;
+    }
+
+    for (i = 0; i < buffer->height/4; i++)  {
+        memcpy(u_dst, u_src, buffer->width);
+        u_dst += buffer->stride;
+        u_src += buffer->width;
+    }
+
+    for (i = 0; i < buffer->height/4; i++)  {
+        memcpy(v_dst, v_src, buffer->width);
+        v_dst += buffer->stride;
+        v_src += buffer->width;
+    }
+}
+
+static void
+copy_nv12_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0, y_size = 0;
+    int i = 0;
+
+    unsigned char *y_src = NULL, *uv_src = NULL;
+    unsigned char *y_dst = NULL, *uv_dst = NULL;
+    unsigned char *src_buffer = NULL;
+
+    uint32_t bytes_read = 0, file_size = 0;
+
+    assert(buffer->mmap);
+    frame_size = buffer->width * buffer->height  + ((buffer->width * buffer->height) >> 1);
+    y_size = buffer->width * buffer->height;
+
+    /* Even number of frames? */
+    fseek(image->fp, 0L, SEEK_END);
+    file_size = ftell(image->fp);
+    fseek(image->fp, 0L, SEEK_SET);
+
+    syslog(LOG_INFO,"file_size = %d, frame_size = %d, y_size = %d \n", file_size, frame_size, y_size);
+
+    src_buffer = (unsigned char*)malloc(frame_size);
+    bytes_read = fread(src_buffer, sizeof(uint8_t), frame_size, image->fp);
+    if(bytes_read < frame_size) {
+        syslog(LOG_ERR, "Failed to read full frame. bytes_read = %d \n", bytes_read);
+    }
+
+    y_src = src_buffer + 0;
+    uv_src = src_buffer + y_size; // UV offset for NV12
+
+    fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
+
+    y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
+    uv_dst = (unsigned char*)buffer->mmap + buffer->stride * buffer->height; // UV offset for NV12
+
+    for (i = 0; i < buffer->height; i++) {
+      memcpy(y_dst, y_src, buffer->width);
+      y_dst += buffer->stride;  // line by line copy based on buffer->stride
+      y_src += buffer->width;
+    }
+
+    for (i = 0; i < buffer->height >> 1; i++)  {
+      memcpy(uv_dst, uv_src, buffer->width);
+      uv_dst += buffer->stride;
+      uv_src += buffer->width;
+    }
+}
+
+static void
+copy_p010_to_dma_buf(struct image *image, struct buffer *buffer)
+{
+    int frame_size = 0, y_size = 0;
+    int i = 0;
+
+    unsigned char *y_src = NULL, *uv_src = NULL;
+    unsigned char *y_dst = NULL, *uv_dst = NULL;
+    unsigned char *src_buffer = NULL;
+    unsigned int bytes_per_pixel = 2;
+
+    assert(buffer->mmap);
+
+    y_size = buffer->width * buffer->height * 2;
+
+    frame_size = buffer->width * buffer->height * bytes_per_pixel * 3/2;
+
+    src_buffer = (unsigned char*)malloc(frame_size);
+    fread(src_buffer, sizeof(uint8_t), frame_size, image->fp);
+
+    y_src = src_buffer;
+    uv_src = src_buffer + y_size; // UV offset for P010
+
+    fprintf(stderr, "hkps width %d height %d stride %ld\n", buffer->width, buffer->height, buffer->stride);
+
+    y_dst = (unsigned char*)buffer->mmap + 0; // Y plane
+    uv_dst = (unsigned char*)buffer->mmap + (buffer->stride * buffer->height); // UV offset for P010
+
+    for (i = 0; i < buffer->height; i++) {
+      memcpy(y_dst, y_src, buffer->width * bytes_per_pixel);
+      y_dst += buffer->stride;  // Doing the line by line copy based on buffer->stride
+      y_src += buffer->width * bytes_per_pixel;
+    }
+
+    for (i = 0; i < buffer->height >> 1; i++)  {
+      memcpy(uv_dst, uv_src, buffer->width * bytes_per_pixel);
+      uv_dst += buffer->stride;
+      uv_src += buffer->width * bytes_per_pixel;
+    }
+}
+
+static void
+fill_buffer(struct buffer *buffer, struct image *image)
+{
+
+    switch (buffer->format) {
+        case DRM_FORMAT_YUV420:
+            copy_yuv420_to_dma_buf(image, buffer);
+            break;
+        case DRM_FORMAT_P010:
+            copy_p010_to_dma_buf(image, buffer);
+            return ;
+        case DRM_FORMAT_NV12:
+            copy_nv12_to_dma_buf(image, buffer);
+            return ;
+        case DRM_FORMAT_XRGB8888:
+        case DRM_FORMAT_ARGB8888:
+        case DRM_FORMAT_BGRA8888:
+        case DRM_FORMAT_ARGB2101010:
+        case DRM_FORMAT_ABGR2101010:
+            copy_rgb_to_dma_buf(image, buffer);
+            break;
+	}
 }
 
 static void
@@ -645,6 +894,8 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 	buffer->width = width;
 	buffer->height = height;
 	buffer->format = format;
+    buf_w = width;
+    buf_h = height;
 
 	switch (format) {
 	case DRM_FORMAT_NV12:
@@ -656,6 +907,7 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 	case DRM_FORMAT_YUV420:
 		pixel_format = GBM_FORMAT_GR88;
 		buf_w = width / 2;
+        // TODO need to check on the height
 		buf_h = height * 2;    /* U/V not interleaved */
 		buffer->cpp = 1;
 		break;
@@ -665,15 +917,20 @@ create_dmabuf_buffer(struct app *app, struct buffer *buffer,
 		buf_h = height * 3 / 2;
 		buffer->cpp = 2;
 		break;
+	case DRM_FORMAT_XRGB8888:
 	case DRM_FORMAT_ARGB8888:
+	case DRM_FORMAT_BGRA8888:
 		pixel_format = GBM_FORMAT_ARGB8888;
-		buf_w = width;
-		buf_h = height;
-		buffer->cpp = 1;
-		break;
+        break;
+	case DRM_FORMAT_ARGB2101010:
+		pixel_format = GBM_FORMAT_ARGB2101010;
+        break;
+	case DRM_FORMAT_ABGR2101010:
+		pixel_format = GBM_FORMAT_ABGR2101010;
+        break;
 	default:
-		buffer->height = height;
 		buffer->cpp = 1;
+		buffer->bytes_per_pixel = 4;
 	}
 
 	buffer->bo = gbm_bo_create_with_modifiers(buffer->gbm, buf_w, buf_h, pixel_format, &modifier, 1);
@@ -844,9 +1101,9 @@ image_create(struct display *display, const char *filename)
 	/* if (option_subtitle) */
 	/* 	app->subtitle = subtitle_create(app); */
 
-	width = 1920;
-	height = 1080;
-	format = DRM_FORMAT_P010;
+	width = option_width;
+	height = option_height;
+	format = option_pixel_format;
 
 	if (option_fullscreen) {
 		window_set_fullscreen(app->window, 1);
@@ -883,15 +1140,88 @@ image_destroy(struct app *app)
 	free(app);
 }
 
+static int parse_pixel_format(const char* c)
+{
+	if (c != NULL) {
+		if (!strcmp(c, "YUV420"))
+			return DRM_FORMAT_YUV420;
+		else if (!strcmp(c, "NV12"))
+			return DRM_FORMAT_NV12;
+		else if (!strcmp(c, "XRGB8888"))
+			return DRM_FORMAT_XRGB8888;
+		else if (!strcmp(c, "ARGB8888"))
+			return DRM_FORMAT_ARGB8888;
+		else if (!strcmp(c, "BGRA8888"))
+			return DRM_FORMAT_BGRA8888;
+		else if (!strcmp(c, "ABGR2101010"))
+			return DRM_FORMAT_ABGR2101010;
+		else if (!strcmp(c, "ARGB2101010"))
+			return DRM_FORMAT_ARGB2101010;
+		else if (!strcmp(c, "P010"))
+			return DRM_FORMAT_P010;
+	}
+	return DRM_FORMAT_XRGB8888;
+}
+
+static int
+is_true(const char* c)
+{
+	int ret = 0;
+	if (c != NULL && ((c[0] ==  '1') || !strcasecmp(c, "true")))
+		ret = 1;
+	return ret;
+}
+
 int
 main(int argc, char *argv[])
 {
 	struct display *display;
 	struct app *app;
 
-	parse_options(options, ARRAY_LENGTH(options), &argc, argv);
-	if (option_help) {
-		printf(help_text, argv[0]);
+	int c, option_index, long_options;
+
+    while ((c = getopt_long(argc, argv, "f:s:i:p:w:h:x:",
+                   long_options, &option_index)) != -1) {
+		switch (c) {
+        case 'f':
+			if (is_true(optarg))
+				option_fullscreen = 1;
+			else
+				option_fullscreen = 0;
+			break;
+
+        case 's':
+			if (is_true(optarg))
+				option_subtitle = 1;
+			else
+				option_subtitle = 0;
+			break;
+
+		case 'i':
+			option_input_file = optarg;
+			break;
+
+		case 'w':
+			option_width = atoi(optarg);
+			break;
+
+		case 'h':
+			option_height = atoi(optarg);
+			break;
+
+		case 'p':
+			option_pixel_format = parse_pixel_format(optarg);
+			break;
+
+		case 'x':
+		default:
+			syslog(LOG_INFO,help_text, argv[0]);
+			return 0;
+		}
+	}
+
+	if( option_input_file == NULL) {
+		syslog(LOG_INFO,help_text, argv[0]);
 		return 0;
 	}
 
@@ -903,11 +1233,11 @@ main(int argc, char *argv[])
 
 	if (!display_has_subcompositor(display)) {
 		fprintf(stderr, "compositor does not support "
-			"the subcompositor extension\n");
+                        "the subcompositor extension\n");
 		return -1;
 	}
 
-	app = image_create(display, argv[argc - 1]);
+	app = image_create(display, option_input_file);
 	if (!app) {
 		fprintf(stderr, "Failed to initialize!");
 		exit(EXIT_FAILURE);
